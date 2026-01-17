@@ -5,91 +5,57 @@
 
   let SKIP_SECONDS = 5;
   let initialized = false;
+  let keyboardAttached = false;
+  let messageAttached = false;
+  let videoObserver = null;
+  let currentVideo = null;
 
   function getVideo() {
     return document.querySelector("video");
   }
 
+function getPlayableVideo() {
+  const videos = Array.from(document.querySelectorAll("video"));
+
+  return videos.find((v) =>
+    Number.isFinite(v.duration) &&
+    v.duration > 0 &&
+    !v.paused &&
+    v.readyState >= 2
+  );
+}
+
   function skip(seconds) {
-    const video = getVideo();
-    if (!video) {
-      console.log("[PrimeVideoSkip] Video not found");
-      return;
-    }
+  const video = getPlayableVideo();
+  if (!video) return;
 
-    const oldTime = video.currentTime;
-    video.currentTime = Math.min(
-      video.duration,
-      Math.max(0, video.currentTime + seconds)
-    );
-
-    console.log(
-      `[PrimeVideoSkip] Skipped ${seconds}s | ${oldTime} → ${video.currentTime}`
-    );
+  if (!Number.isFinite(video.currentTime) || !Number.isFinite(video.duration)) {
+    console.warn("[PrimeVideoSkip] Invalid video state, skip ignored");
+    return;
   }
 
-  function createButtons() {
-    if (document.getElementById("pv-skip-controls")) return;
+  const oldTime = video.currentTime;
+  const newTime = Math.min(
+    video.duration,
+    Math.max(0, oldTime + seconds)
+  );
 
-    const container = document.createElement("div");
-    container.id = "pv-skip-controls";
-    container.style.cssText = `
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      z-index: 9999;
-      display: flex;
-      gap: 8px;
-    `;
+  video.currentTime = newTime;
 
-    const btnBack = document.createElement("button");
-    const btnForward = document.createElement("button");
+  console.log(
+    `[PrimeVideoSkip] Skipped ${seconds}s | ${oldTime} → ${newTime}`
+  );
+}
 
-    btnBack.textContent = `−${SKIP_SECONDS}s`;
-    btnForward.textContent = `+${SKIP_SECONDS}s`;
-
-    [btnBack, btnForward].forEach((btn) => {
-      btn.style.cssText = `
-        padding: 8px 12px;
-        font-size: 14px;
-        cursor: pointer;
-        border-radius: 6px;
-        border: none;
-        background: rgba(0,0,0,0.7);
-        color: white;
-      `;
-    });
-
-    btnBack.onclick = () => skip(-SKIP_SECONDS);
-    btnForward.onclick = () => skip(SKIP_SECONDS);
-
-    container.append(btnBack, btnForward);
-    document.body.appendChild(container);
-
-    console.log("[PrimeVideoSkip] UI buttons added");
-  }
-
-  function init() {
-    if (initialized) return;
-
-    const video = getVideo();
-    if (!video) {
-      console.log("[PrimeVideoSkip] No video found on this page");
-      return; // ✅ ARTIK YASAL
-    }
-
-    initialized = true;
-
-    chrome.storage.sync.get({ skipSeconds: 5 }, (data) => {
-      SKIP_SECONDS = data.skipSeconds;
-      console.log("[PrimeVideoSkip] Skip seconds loaded:", SKIP_SECONDS);
-    });
+ 
+  function attachKeyboardListener() {
+    if (keyboardAttached) return;
+    keyboardAttached = true;
 
     document.addEventListener(
       "keydown",
       (e) => {
-        const video = getVideo();
-        if (!video) return;
+        if (!currentVideo) return;
 
         const tag = document.activeElement?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || e.isComposing) return;
@@ -108,20 +74,90 @@
       },
       true
     );
+  }
+
+  function attachMessageListener() {
+    if (messageAttached) return;
+    messageAttached = true;
 
     chrome.runtime.onMessage.addListener((msg) => {
+      if (!currentVideo) return;
+
       if (msg.command === "skip-forward") skip(SKIP_SECONDS);
       if (msg.command === "skip-backward") skip(-SKIP_SECONDS);
     });
-
-    setTimeout(createButtons, 3000);
   }
 
-  const observer = new MutationObserver(init);
-  observer.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-  });
+  function onVideoReady(video) {
+    if (initialized && video === currentVideo) return;
+
+    initialized = true;
+    currentVideo = video;
+
+    console.log("[PrimeVideoSkip] Video detected");
+
+    chrome.storage.sync.get({ skipSeconds: 5 }, (data) => {
+      SKIP_SECONDS = data.skipSeconds;
+
+      const controls = document.getElementById("pv-skip-controls");
+      if (controls) controls.remove();
+
+    });
+
+    attachKeyboardListener();
+    attachMessageListener();
+
+    watchVideoRemoval(video);
+  }
+
+  function watchVideoRemoval(video) {
+    const observer = new MutationObserver(() => {
+      if (!document.contains(video)) {
+        observer.disconnect();
+        reset();
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  function reset() {
+    console.log("[PrimeVideoSkip] Video removed, waiting again");
+
+    initialized = false;
+    currentVideo = null;
+
+    const controls = document.getElementById("pv-skip-controls");
+    if (controls) controls.remove();
+
+    waitForVideo();
+  }
+
+  function waitForVideo() {
+    if (videoObserver) videoObserver.disconnect();
+
+    const video = getVideo();
+    if (video) {
+      onVideoReady(video);
+      return;
+    }
+
+    videoObserver = new MutationObserver(() => {
+      const video = getVideo();
+      if (video) {
+        videoObserver.disconnect();
+        onVideoReady(video);
+      }
+    });
+
+    videoObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "sync" && changes.skipSeconds) {
@@ -129,9 +165,9 @@
 
       const controls = document.getElementById("pv-skip-controls");
       if (controls) controls.remove();
-      createButtons();
+
     }
   });
 
-  init();
+  waitForVideo();
 })();
